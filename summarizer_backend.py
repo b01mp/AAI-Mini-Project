@@ -2,22 +2,32 @@ import nltk
 from nltk.tokenize import sent_tokenize
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
-from transformers import pipeline
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-# Download necessary NLTK data files for text processing
-nltk.download('punkt')
-nltk.download('stopwords')
+# Download necessary NLTK data files for text processing (quiet=True prevents spammy output)
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)
+nltk.download('stopwords', quiet=True)
 
 class TextSummarizer:
     def __init__(self):
         """
         Initialize the summarizer. 
-        We use the T5 model, which is a Transformer model (Syllabus Topic 2).
-        Using 't5-small' ensures it runs smoothly on standard student laptops.
+        We use the T5 model, a Transformer neural network (Syllabus Topic 2).
+        Direct model loading bypasses recent pipeline deprecations in HuggingFace.
         """
         print("Loading Transformer Model (T5-Small)... This may take a moment on the first run.")
-        self.abstractive_summarizer = pipeline("summarization", model="t5-small", tokenizer="t5-small")
-        print("Model loaded successfully!\n")
+        model_name = "t5-small"
+        
+        # Load tokenizer and model directly
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        
+        # Automatically use GPU if available, otherwise fallback to CPU
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model.to(self.device)
+        print(f"Model loaded successfully on {self.device.upper()}!\n")
 
     def extractive_summary(self, text, num_sentences=3):
         """
@@ -53,32 +63,24 @@ class TextSummarizer:
         # T5 requires a specific task prefix to know what to do
         input_text = "summarize: " + text
         
-        summary = self.abstractive_summarizer(
+        # 1. Tokenize the input text and move to the correct device (CPU/GPU)
+        inputs = self.tokenizer.encode(
             input_text, 
-            min_length=min_length, 
-            max_length=max_length, 
-            do_sample=False
+            return_tensors="pt", 
+            max_length=512, 
+            truncation=True
+        ).to(self.device)
+        
+        # 2. Generate summary using Beam Search (produces higher quality than basic sampling)
+        summary_ids = self.model.generate(
+            inputs,
+            max_length=max_length,
+            min_length=min_length,
+            length_penalty=2.0,
+            num_beams=4,
+            early_stopping=True
         )
-        return summary[0]['summary_text']
-
-
-if __name__ == "__main__":
-    # --- Test the application ---
-    sample_text = """
-    Artificial Intelligence (AI) is transforming various sectors, including business and healthcare. 
-    In business, AI is used for smart investment analysis, customer support, and robotic process automation. 
-    Natural Language Processing (NLP), a subset of AI, enables machines to understand human language. 
-    Techniques like text classification, sentiment analysis, and named entity recognition are fundamental to NLP. 
-    Furthermore, advanced neural models such as RNNs, LSTMs, and Transformers like BERT and GPT have revolutionized 
-    how machines process and generate text. These models are now being applied to create sophisticated text summarizers, 
-    capable of condensing large documents into concise, meaningful summaries.
-    """
-    
-    # Initialize the app
-    app = TextSummarizer()
-    
-    print("--- Extractive Summary (Topic 1: Feature Extraction) ---")
-    print(app.extractive_summary(sample_text, num_sentences=2))
-    
-    print("\n--- Abstractive Summary (Topic 2: Transformer Models) ---")
-    print(app.abstractive_summary(sample_text))
+        
+        # 3. Decode the generated token IDs back into human-readable text
+        summary = self.tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+        return summary
